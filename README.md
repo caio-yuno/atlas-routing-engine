@@ -59,7 +59,24 @@ curl -s -X POST http://localhost:3000/api/route \
 | `country` | string | Yes | `MX`, `BR`, `US` |
 | `optimizationMode` | string | No | `maximize_approvals`, `balanced` (default), `cost_conscious` |
 
-**Response:** Routing decision with selected acquirer, all acquirer scores, justification, and fallback sequence.
+**Sample response:**
+
+```json
+{
+  "selectedAcquirer": "Acquirer A",
+  "scores": [
+    { "acquirer": "Acquirer A", "totalScore": 0.82, "approvalRate": 0.92, "healthStatus": "healthy", "takeRate": 2.8 },
+    { "acquirer": "Acquirer B", "totalScore": 0.76, "approvalRate": 0.85, "healthStatus": "healthy", "takeRate": 3.1 },
+    { "acquirer": "Acquirer C", "totalScore": 0.74, "approvalRate": 0.73, "healthStatus": "healthy", "takeRate": 2.1 }
+  ],
+  "justification": "Route to Acquirer A: 92% approval for MXN credit cards vs 85% (B) and 73% (C). Mode: balanced",
+  "optimizationMode": "balanced",
+  "fallbackSequence": [
+    { "acquirer": "Acquirer B", "expectedApprovalRate": 0.85, "reason": "Secondary: next highest approval rate (85%) for this transaction type" },
+    { "acquirer": "Acquirer C", "expectedApprovalRate": 0.73, "reason": "Tertiary: available with 73% approval rate" }
+  ]
+}
+```
 
 ### GET /api/health
 
@@ -246,7 +263,7 @@ atlas-routing-engine/
       fallback-sequencer.ts    # Smart fallback ordering
     utils/comparison.ts        # Smart vs round-robin comparison analysis
     index.ts                   # Express server wiring
-  tests/routing.test.ts        # Unit tests (16 tests, node assert)
+  tests/routing.test.ts        # Unit tests (18 tests, node assert)
   scripts/demo.sh              # End-to-end demo script
   package.json
   tsconfig.json

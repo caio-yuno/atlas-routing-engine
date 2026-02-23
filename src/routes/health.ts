@@ -1,16 +1,18 @@
 import { Router, Request, Response } from 'express';
-import { healthMonitor } from '../services/health-monitor';
+import { HealthMonitor } from '../services/health-monitor';
 
-const router = Router();
+export function createHealthRouter(healthMonitor: HealthMonitor): Router {
+  const router = Router();
 
-router.get('/', (_req: Request, res: Response) => {
-  res.json(healthMonitor.getAllHealth());
-});
+  router.get('/', (_req: Request, res: Response) => {
+    res.json(healthMonitor.getAllHealth());
+  });
 
-router.get('/:acquirer', (req: Request, res: Response) => {
-  const { acquirer } = req.params;
-  const health = healthMonitor.getHealth(acquirer);
-  res.json(health);
-});
+  router.get('/:acquirer', (req: Request, res: Response) => {
+    const { acquirer } = req.params;
+    const health = healthMonitor.getHealth(acquirer);
+    res.json(health);
+  });
 
-export default router;
+  return router;
+}

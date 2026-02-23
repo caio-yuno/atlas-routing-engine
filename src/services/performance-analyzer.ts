@@ -24,14 +24,27 @@ export class PerformanceAnalyzer {
   private segments: Map<string, SegmentStats> = new Map();
   private transactions: Transaction[] = [];
 
-  constructor() {
-    this.loadAndCompute();
+  constructor(transactions?: Transaction[]) {
+    if (transactions) {
+      this.transactions = transactions;
+    } else {
+      this.loadFromFile();
+    }
+    this.computeSegments();
   }
 
-  private loadAndCompute(): void {
+  private loadFromFile(): void {
     const dataPath = path.resolve(__dirname, '../data/historical.json');
-    const raw = fs.readFileSync(dataPath, 'utf-8');
-    this.transactions = JSON.parse(raw) as Transaction[];
+    try {
+      const raw = fs.readFileSync(dataPath, 'utf-8');
+      this.transactions = JSON.parse(raw) as Transaction[];
+    } catch (err) {
+      console.error(`Warning: Could not load historical data from ${dataPath}. Run 'npm run generate' first.`);
+      this.transactions = [];
+    }
+  }
+
+  private computeSegments(): void {
 
     for (const tx of this.transactions) {
       const isApproved = tx.outcome === 'approved' ? 1 : 0;

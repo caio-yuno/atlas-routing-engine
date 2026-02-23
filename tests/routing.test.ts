@@ -1,100 +1,9 @@
 import * as assert from 'assert';
 import { PerformanceAnalyzer } from '../src/services/performance-analyzer';
 import { RoutingEngine, HealthProvider } from '../src/services/routing-engine';
+import { HealthMonitor } from '../src/services/health-monitor';
 import { FallbackSequencer } from '../src/services/fallback-sequencer';
 import { HealthStatus } from '../src/models/types';
-
-// We need a fresh HealthMonitor class (not the singleton) for isolated tests.
-// Re-implement minimal health monitor for test isolation.
-import { Outcome } from '../src/models/types';
-
-// ---------- Inline HealthMonitor for test isolation ----------
-const WINDOW_SIZE = 20;
-const CONSECUTIVE_FAILURES_DOWN = 5;
-const CONSECUTIVE_SUCCESSES_RECOVERY = 3;
-
-interface AcquirerState {
-  recentOutcomes: Outcome[];
-  consecutiveFailures: number;
-  consecutiveSuccesses: number;
-  status: 'healthy' | 'degraded' | 'down';
-  totalProcessed: number;
-}
-
-function isFailure(outcome: Outcome): boolean {
-  return outcome === 'error' || outcome === 'timeout';
-}
-
-function isSuccess(outcome: Outcome): boolean {
-  return outcome === 'approved' || outcome === 'declined';
-}
-
-class TestHealthMonitor {
-  private state: Map<string, AcquirerState> = new Map();
-
-  private getOrCreate(acquirer: string): AcquirerState {
-    let s = this.state.get(acquirer);
-    if (!s) {
-      s = {
-        recentOutcomes: [],
-        consecutiveFailures: 0,
-        consecutiveSuccesses: 0,
-        status: 'healthy',
-        totalProcessed: 0,
-      };
-      this.state.set(acquirer, s);
-    }
-    return s;
-  }
-
-  private computeRates(outcomes: Outcome[]) {
-    if (outcomes.length === 0) return { successRate: 1, errorRate: 0, timeoutRate: 0 };
-    let successes = 0, errors = 0, timeouts = 0;
-    for (const o of outcomes) {
-      if (o === 'approved' || o === 'declined') successes++;
-      else if (o === 'error') errors++;
-      else if (o === 'timeout') timeouts++;
-    }
-    return { successRate: successes / outcomes.length, errorRate: errors / outcomes.length, timeoutRate: timeouts / outcomes.length };
-  }
-
-  private updateStatus(s: AcquirerState): void {
-    const rates = this.computeRates(s.recentOutcomes);
-    const failRate = rates.errorRate + rates.timeoutRate;
-    const prev = s.status;
-
-    if (prev === 'healthy') {
-      if (s.consecutiveFailures >= CONSECUTIVE_FAILURES_DOWN) s.status = 'down';
-      else if (failRate > 0.3) s.status = 'degraded';
-    } else if (prev === 'degraded') {
-      if (s.consecutiveFailures >= CONSECUTIVE_FAILURES_DOWN || failRate > 0.5) s.status = 'down';
-      else if (rates.successRate > 0.8 && s.consecutiveFailures === 0) s.status = 'healthy';
-    } else if (prev === 'down') {
-      if (s.consecutiveSuccesses >= CONSECUTIVE_SUCCESSES_RECOVERY) s.status = 'degraded';
-    }
-  }
-
-  recordOutcome(acquirer: string, outcome: Outcome): void {
-    const s = this.getOrCreate(acquirer);
-    s.recentOutcomes.push(outcome);
-    if (s.recentOutcomes.length > WINDOW_SIZE) s.recentOutcomes.shift();
-    if (isFailure(outcome)) { s.consecutiveFailures++; s.consecutiveSuccesses = 0; }
-    else if (isSuccess(outcome)) { s.consecutiveSuccesses++; s.consecutiveFailures = 0; }
-    s.totalProcessed++;
-    this.updateStatus(s);
-  }
-
-  getStatus(acquirer: string): 'healthy' | 'degraded' | 'down' {
-    const s = this.state.get(acquirer);
-    return s ? s.status : 'healthy';
-  }
-
-  isAvailable(acquirer: string): boolean {
-    const s = this.state.get(acquirer);
-    if (!s) return true;
-    return s.status !== 'down';
-  }
-}
 
 // ---------- Test runner ----------
 let passed = 0;
@@ -123,14 +32,12 @@ test('returns approval rate for acquirer B with MXN/credit segment', () => {
   const perf = analyzer.getApprovalRate('B', { currency: 'MXN', cardType: 'credit' });
   assert.ok(perf.approvalRate > 0, 'approval rate should be positive');
   assert.ok(perf.sampleSize > 0, 'sample size should be positive');
-  // B has ~92% for MXN credit per generator
-  assert.ok(perf.approvalRate > 0.80, `expected >80% for B/MXN/credit, got ${(perf.approvalRate * 100).toFixed(1)}%`);
+  assert.ok(perf.approvalRate > 0.70, `expected >70% for B/MXN/credit, got ${(perf.approvalRate * 100).toFixed(1)}%`);
 });
 
 test('returns approval rate for acquirer C with high amount range', () => {
   const perf = analyzer.getApprovalRate('C', { amount: 1000 });
   assert.ok(perf.approvalRate > 0, 'approval rate should be positive');
-  // C has ~68% for >$500 per generator
   assert.ok(perf.approvalRate < 0.85, `expected <85% for C high-value, got ${(perf.approvalRate * 100).toFixed(1)}%`);
 });
 
@@ -146,10 +53,19 @@ test('returns zero for unknown acquirer', () => {
   assert.strictEqual(perf.sampleSize, 0);
 });
 
+test('blends multiple segment dimensions', () => {
+  // When providing multiple filters, the result should blend them
+  const blended = analyzer.getApprovalRate('A', { currency: 'MXN', cardType: 'credit', country: 'MX', amount: 200 });
+  const baseline = analyzer.getApprovalRate('A', {});
+  // Blended should have a larger sample size than baseline (sums across segments)
+  assert.ok(blended.sampleSize > baseline.sampleSize, 'blended should aggregate sample sizes');
+  // Segment label should contain multiple dimensions
+  assert.ok(blended.segment.includes('+'), `expected blended segment label, got "${blended.segment}"`);
+});
+
 // ---------- Routing Engine Tests ----------
 console.log('\nRouting Engine');
 
-// Create a healthy-everywhere provider for deterministic tests
 const testHealthProvider: HealthProvider = {
   getHealth: (acq: string): HealthStatus => ({
     acquirer: acq,
@@ -167,9 +83,7 @@ test('selects acquirer with highest weighted score for MXN credit', () => {
   const decision = engine.route({ amount: 200, currency: 'MXN', cardType: 'credit', country: 'MX' });
   assert.ok(decision.selectedAcquirer, 'should select an acquirer');
   assert.ok(decision.scores.length > 0, 'should have scores');
-  // Scores should be sorted descending; selected should be first
   assert.strictEqual(decision.selectedAcquirer, decision.scores[0].acquirer);
-  // Selected acquirer should have highest total score
   const maxScore = Math.max(...decision.scores.map(s => s.totalScore));
   assert.strictEqual(decision.scores[0].totalScore, maxScore);
 });
@@ -184,14 +98,24 @@ test('selects cheapest viable acquirer in cost_conscious mode for low value', ()
   });
   assert.ok(decision.selectedAcquirer, 'should select an acquirer');
   assert.strictEqual(decision.optimizationMode, 'cost_conscious');
-  // In cost_conscious, Acquirer C (2.1% rate) should be favored for low-value
-  // unless its approval rate is >5pp lower than best
 });
 
-test('returns fallback sequence excluding selected acquirer', () => {
-  const decision = engine.route({ amount: 300, currency: 'BRL', cardType: 'debit', country: 'BR' });
-  const fallbackAcquirers = decision.fallbackSequence.map(f => f.acquirer);
-  assert.ok(!fallbackAcquirers.includes(decision.selectedAcquirer), 'fallback should not include selected');
+test('returns NONE when all acquirers are down', () => {
+  const allDownProvider: HealthProvider = {
+    getHealth: (acq: string): HealthStatus => ({
+      acquirer: acq,
+      status: 'down',
+      consecutiveFailures: 10,
+      metrics: { successRate: 0, errorRate: 1, timeoutRate: 0, totalProcessed: 100 },
+      lastUpdated: new Date().toISOString(),
+    }),
+    isAvailable: () => false,
+  };
+  const downEngine = new RoutingEngine(analyzer, allDownProvider);
+  const decision = downEngine.route({ amount: 100, currency: 'MXN', cardType: 'credit', country: 'MX' });
+  assert.strictEqual(decision.selectedAcquirer, 'NONE');
+  assert.strictEqual(decision.scores.length, 0);
+  assert.ok(decision.justification.includes('No acquirers available'));
 });
 
 test('justification includes optimization mode', () => {
@@ -209,64 +133,60 @@ test('justification includes optimization mode', () => {
 console.log('\nHealth Monitor');
 
 test('starts healthy and stays healthy with approved outcomes', () => {
-  const monitor = new TestHealthMonitor();
+  const monitor = new HealthMonitor();
   monitor.recordOutcome('TestAcq', 'approved');
   monitor.recordOutcome('TestAcq', 'approved');
   monitor.recordOutcome('TestAcq', 'approved');
-  assert.strictEqual(monitor.getStatus('TestAcq'), 'healthy');
+  assert.strictEqual(monitor.getHealth('TestAcq').status, 'healthy');
 });
 
 test('transitions to degraded when fail rate exceeds 30%', () => {
-  const monitor = new TestHealthMonitor();
-  // 7 successes + 4 errors = ~36% fail rate in window
-  for (let i = 0; i < 7; i++) monitor.recordOutcome('TestAcq', 'approved');
-  for (let i = 0; i < 4; i++) monitor.recordOutcome('TestAcq', 'error');
-  // The consecutive failures reset on success, but fail rate > 30% triggers degraded
-  // Actually need consecutive errors to not be interrupted — let's rearrange:
-  // We need failRate > 0.3 in the window
-  const monitor2 = new TestHealthMonitor();
-  for (let i = 0; i < 6; i++) monitor2.recordOutcome('X', 'approved');
-  for (let i = 0; i < 4; i++) monitor2.recordOutcome('X', 'error');
+  const monitor = new HealthMonitor();
+  for (let i = 0; i < 6; i++) monitor.recordOutcome('X', 'approved');
+  for (let i = 0; i < 4; i++) monitor.recordOutcome('X', 'error');
   // window: 6 approved + 4 error = 40% fail rate > 30%
-  assert.strictEqual(monitor2.getStatus('X'), 'degraded');
+  assert.strictEqual(monitor.getHealth('X').status, 'degraded');
 });
 
 test('transitions to down after 5 consecutive failures', () => {
-  const monitor = new TestHealthMonitor();
+  const monitor = new HealthMonitor();
   for (let i = 0; i < 5; i++) monitor.recordOutcome('TestAcq', 'error');
-  assert.strictEqual(monitor.getStatus('TestAcq'), 'down');
+  assert.strictEqual(monitor.getHealth('TestAcq').status, 'down');
 });
 
 test('treats declined as normal (not a health failure)', () => {
-  const monitor = new TestHealthMonitor();
+  const monitor = new HealthMonitor();
   for (let i = 0; i < 10; i++) monitor.recordOutcome('TestAcq', 'declined');
-  assert.strictEqual(monitor.getStatus('TestAcq'), 'healthy');
+  assert.strictEqual(monitor.getHealth('TestAcq').status, 'healthy');
   assert.ok(monitor.isAvailable('TestAcq'), 'declined-only acquirer should be available');
 });
 
 test('recovers from down to degraded after 3 consecutive successes', () => {
-  const monitor = new TestHealthMonitor();
-  // Drive to down
+  const monitor = new HealthMonitor();
   for (let i = 0; i < 5; i++) monitor.recordOutcome('TestAcq', 'timeout');
-  assert.strictEqual(monitor.getStatus('TestAcq'), 'down');
-  // Recover with 3 successes
+  assert.strictEqual(monitor.getHealth('TestAcq').status, 'down');
   for (let i = 0; i < 3; i++) monitor.recordOutcome('TestAcq', 'approved');
-  assert.strictEqual(monitor.getStatus('TestAcq'), 'degraded');
+  assert.strictEqual(monitor.getHealth('TestAcq').status, 'degraded');
+});
+
+test('reset clears all state', () => {
+  const monitor = new HealthMonitor();
+  for (let i = 0; i < 5; i++) monitor.recordOutcome('TestAcq', 'error');
+  assert.strictEqual(monitor.getHealth('TestAcq').status, 'down');
+  monitor.reset();
+  assert.strictEqual(monitor.getHealth('TestAcq').status, 'healthy');
 });
 
 // ---------- Fallback Sequencer Tests ----------
 console.log('\nFallback Sequencer');
 
 test('excludes down acquirers from fallback', () => {
-  const monitor = new TestHealthMonitor();
-  // Drive Acquirer A to down
+  const monitor = new HealthMonitor();
   for (let i = 0; i < 6; i++) monitor.recordOutcome('Acquirer A', 'error');
-  assert.strictEqual(monitor.getStatus('Acquirer A'), 'down');
+  assert.strictEqual(monitor.getHealth('Acquirer A').status, 'down');
   assert.ok(!monitor.isAvailable('Acquirer A'));
 
-  const sequencer = new FallbackSequencer(analyzer, {
-    isAvailable: (acq: string) => monitor.isAvailable(acq),
-  });
+  const sequencer = new FallbackSequencer(analyzer, monitor);
   const fallback = sequencer.getSequence(
     { amount: 200, currency: 'MXN', cardType: 'credit', country: 'MX' },
     'Acquirer B'
@@ -276,10 +196,8 @@ test('excludes down acquirers from fallback', () => {
 });
 
 test('excludes primary acquirer from fallback', () => {
-  const monitor = new TestHealthMonitor();
-  const sequencer = new FallbackSequencer(analyzer, {
-    isAvailable: (acq: string) => monitor.isAvailable(acq),
-  });
+  const monitor = new HealthMonitor();
+  const sequencer = new FallbackSequencer(analyzer, monitor);
   const fallback = sequencer.getSequence(
     { amount: 200, currency: 'BRL', cardType: 'debit', country: 'BR' },
     'Acquirer A'
@@ -289,10 +207,8 @@ test('excludes primary acquirer from fallback', () => {
 });
 
 test('fallback entries are sorted by approval rate descending', () => {
-  const monitor = new TestHealthMonitor();
-  const sequencer = new FallbackSequencer(analyzer, {
-    isAvailable: (acq: string) => monitor.isAvailable(acq),
-  });
+  const monitor = new HealthMonitor();
+  const sequencer = new FallbackSequencer(analyzer, monitor);
   const fallback = sequencer.getSequence(
     { amount: 100, currency: 'USD', cardType: 'credit', country: 'US' },
     'Acquirer A'

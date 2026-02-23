@@ -1,9 +1,8 @@
 import * as path from 'path';
 import * as fs from 'fs';
-import { Transaction, PaymentRequest } from '../models/types';
+import { Transaction, PaymentRequest, HealthStatus } from '../models/types';
 import { PerformanceAnalyzer } from '../services/performance-analyzer';
 import { RoutingEngine, HealthProvider } from '../services/routing-engine';
-import { HealthStatus } from '../models/types';
 
 interface SegmentImprovement {
   segment: string;
@@ -58,7 +57,8 @@ export function runComparison(): ComparisonResult {
   const acquirerNames = ['A', 'B', 'C'];
 
   // --- Build counterfactual lookup tables ---
-  // Key: "acquirer:currency:cardType:amountRange" → array of outcomes
+  // Segment key: "acquirer:currency:cardType:amountRange" → array of outcomes
+  // Baseline key: "acquirer:baseline" → array of all outcomes for that acquirer
   const outcomeTable: Record<string, ('approved' | 'other')[]> = {};
 
   function getAmountRange(amount: number): string {
@@ -69,22 +69,26 @@ export function runComparison(): ComparisonResult {
 
   for (const tx of historical) {
     const range = getAmountRange(tx.amount);
-    const key = `${tx.acquirer}:${tx.currency}:${tx.cardType}:${range}`;
-    if (!outcomeTable[key]) outcomeTable[key] = [];
-    outcomeTable[key].push(tx.outcome === 'approved' ? 'approved' : 'other');
+    const segKey = `${tx.acquirer}:${tx.currency}:${tx.cardType}:${range}`;
+    const baseKey = `${tx.acquirer}:baseline`;
+    const outcome = tx.outcome === 'approved' ? 'approved' as const : 'other' as const;
+    if (!outcomeTable[segKey]) outcomeTable[segKey] = [];
+    outcomeTable[segKey].push(outcome);
+    if (!outcomeTable[baseKey]) outcomeTable[baseKey] = [];
+    outcomeTable[baseKey].push(outcome);
   }
 
   // Deterministic counterfactual sampler: cycles through outcomes for the segment
-  const sampleCounters: Record<string, number> = {};
+  let sampleCounters: Record<string, number> = {};
   function counterfactualOutcome(acquirer: string, currency: string, cardType: string, amount: number): boolean {
     const range = getAmountRange(amount);
     const key = `${acquirer}:${currency}:${cardType}:${range}`;
     const outcomes = outcomeTable[key];
     if (!outcomes || outcomes.length === 0) {
       // Fall back to acquirer-level baseline
-      const baselineKey = acquirer;
+      const baselineKey = `${acquirer}:baseline`;
       const baselineOutcomes = outcomeTable[baselineKey];
-      if (!baselineOutcomes) return false;
+      if (!baselineOutcomes || baselineOutcomes.length === 0) return false;
       const idx = (sampleCounters[baselineKey] || 0) % baselineOutcomes.length;
       sampleCounters[baselineKey] = idx + 1;
       return baselineOutcomes[idx] === 'approved';
@@ -127,9 +131,7 @@ export function runComparison(): ComparisonResult {
   }
 
   // Reset sample counters for smart routing simulation
-  for (const key of Object.keys(sampleCounters)) {
-    sampleCounters[key] = 0;
-  }
+  sampleCounters = {};
 
   // --- Smart routing simulation (true counterfactual) ---
   let smartApproved = 0;

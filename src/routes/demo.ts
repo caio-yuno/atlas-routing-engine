@@ -65,4 +65,3 @@ export function createDemoRouter(routingEngine: RoutingEngine, fallbackSequencer
   return router;
 }
 
-export default Router();

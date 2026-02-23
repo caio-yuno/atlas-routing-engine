@@ -3,33 +3,37 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { Transaction } from './models/types';
 import { PerformanceAnalyzer } from './services/performance-analyzer';
-import { healthMonitor } from './services/health-monitor';
+import { HealthMonitor } from './services/health-monitor';
 import { RoutingEngine } from './services/routing-engine';
 import { FallbackSequencer } from './services/fallback-sequencer';
 import { createPaymentsRouter } from './routes/payments';
+import { createHealthRouter } from './routes/health';
 import { createDemoRouter } from './routes/demo';
-import healthRouter from './routes/health';
 
 const app = express();
 const PORT = 3000;
 
 app.use(express.json());
 
-// Initialize services with dependency injection
-const performanceAnalyzer = new PerformanceAnalyzer();
-
-// Load historical data and initialize health monitor
+// Load historical data
 const historicalPath = path.resolve(__dirname, 'data/historical.json');
-const historicalData: Transaction[] = JSON.parse(fs.readFileSync(historicalPath, 'utf-8'));
-healthMonitor.initializeFromHistory(historicalData);
+let historicalData: Transaction[] = [];
+try {
+  historicalData = JSON.parse(fs.readFileSync(historicalPath, 'utf-8'));
+} catch {
+  console.error(`Warning: Could not load ${historicalPath}. Run 'npm run generate' first.`);
+}
 
-// Inject dependencies into routing engine
+// Initialize all services with dependency injection
+const performanceAnalyzer = new PerformanceAnalyzer(historicalData);
+const healthMonitor = new HealthMonitor();
+healthMonitor.initializeFromHistory(historicalData);
 const routingEngine = new RoutingEngine(performanceAnalyzer, healthMonitor);
 const fallbackSequencer = new FallbackSequencer(performanceAnalyzer, healthMonitor);
 
-// Wire routes
+// Wire routes — all use DI, no singleton imports
 app.use('/api/route', createPaymentsRouter(routingEngine, fallbackSequencer));
-app.use('/api/health', healthRouter);
+app.use('/api/health', createHealthRouter(healthMonitor));
 app.use('/api/demo', createDemoRouter(routingEngine, fallbackSequencer));
 
 app.get('/', (_req, res) => {

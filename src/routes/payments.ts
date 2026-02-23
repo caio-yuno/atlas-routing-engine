@@ -54,4 +54,3 @@ export function createPaymentsRouter(routingEngine: RoutingEngine, fallbackSeque
   return router;
 }
 
-export default Router();

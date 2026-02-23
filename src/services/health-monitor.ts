@@ -21,7 +21,7 @@ function isSuccess(outcome: Outcome): boolean {
   return outcome === 'approved' || outcome === 'declined';
 }
 
-class HealthMonitor {
+export class HealthMonitor {
   private state: Map<string, AcquirerState> = new Map();
 
   private getOrCreateState(acquirer: string): AcquirerState {
@@ -146,6 +146,11 @@ class HealthMonitor {
       this.recordOutcome(txn.acquirer, txn.outcome);
     }
   }
+
+  reset(): void {
+    this.state.clear();
+  }
 }
 
+// Default instance for production use
 export const healthMonitor = new HealthMonitor();

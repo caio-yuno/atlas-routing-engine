@@ -1,0 +1,182 @@
+[
+  {
+    "amount": 10,
+    "currency": "MXN",
+    "cardType": "credit",
+    "country": "MX"
+  },
+  {
+    "amount": 10,
+    "currency": "BRL",
+    "cardType": "debit",
+    "country": "BR"
+  },
+  {
+    "amount": 10,
+    "currency": "USD",
+    "cardType": "credit",
+    "country": "US"
+  },
+  {
+    "amount": 499,
+    "currency": "MXN",
+    "cardType": "credit",
+    "country": "MX"
+  },
+  {
+    "amount": 499,
+    "currency": "BRL",
+    "cardType": "debit",
+    "country": "BR"
+  },
+  {
+    "amount": 499,
+    "currency": "USD",
+    "cardType": "credit",
+    "country": "US"
+  },
+  {
+    "amount": 501,
+    "currency": "MXN",
+    "cardType": "debit",
+    "country": "MX"
+  },
+  {
+    "amount": 501,
+    "currency": "BRL",
+    "cardType": "credit",
+    "country": "BR"
+  },
+  {
+    "amount": 501,
+    "currency": "USD",
+    "cardType": "debit",
+    "country": "US"
+  },
+  {
+    "amount": 1500,
+    "currency": "MXN",
+    "cardType": "credit",
+    "country": "MX"
+  },
+  {
+    "amount": 1500,
+    "currency": "BRL",
+    "cardType": "debit",
+    "country": "BR"
+  },
+  {
+    "amount": 1500,
+    "currency": "USD",
+    "cardType": "credit",
+    "country": "US"
+  },
+  {
+    "amount": 2000,
+    "currency": "MXN",
+    "cardType": "debit",
+    "country": "MX"
+  },
+  {
+    "amount": 2000,
+    "currency": "BRL",
+    "cardType": "credit",
+    "country": "BR"
+  },
+  {
+    "amount": 2000,
+    "currency": "USD",
+    "cardType": "debit",
+    "country": "US"
+  },
+  {
+    "amount": 150,
+    "currency": "MXN",
+    "cardType": "credit",
+    "country": "MX"
+  },
+  {
+    "amount": 250,
+    "currency": "BRL",
+    "cardType": "debit",
+    "country": "BR"
+  },
+  {
+    "amount": 350,
+    "currency": "USD",
+    "cardType": "credit",
+    "country": "US"
+  },
+  {
+    "amount": 75.5,
+    "currency": "MXN",
+    "cardType": "debit",
+    "country": "MX"
+  },
+  {
+    "amount": 420,
+    "currency": "BRL",
+    "cardType": "credit",
+    "country": "BR"
+  },
+  {
+    "amount": 600,
+    "currency": "USD",
+    "cardType": "debit",
+    "country": "US"
+  },
+  {
+    "amount": 880,
+    "currency": "MXN",
+    "cardType": "credit",
+    "country": "MX"
+  },
+  {
+    "amount": 199.99,
+    "currency": "BRL",
+    "cardType": "debit",
+    "country": "BR"
+  },
+  {
+    "amount": 1200,
+    "currency": "USD",
+    "cardType": "credit",
+    "country": "US"
+  },
+  {
+    "amount": 55,
+    "currency": "MXN",
+    "cardType": "debit",
+    "country": "MX"
+  },
+  {
+    "amount": 750,
+    "currency": "BRL",
+    "cardType": "credit",
+    "country": "BR"
+  },
+  {
+    "amount": 333.33,
+    "currency": "USD",
+    "cardType": "debit",
+    "country": "US"
+  },
+  {
+    "amount": 500,
+    "currency": "MXN",
+    "cardType": "credit",
+    "country": "MX"
+  },
+  {
+    "amount": 500,
+    "currency": "BRL",
+    "cardType": "debit",
+    "country": "BR"
+  },
+  {
+    "amount": 1000,
+    "currency": "USD",
+    "cardType": "credit",
+    "country": "US"
+  }
+]

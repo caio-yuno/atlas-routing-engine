@@ -15,7 +15,7 @@ const PORT = 3000;
 
 app.use(express.json());
 
-// Initialize services
+// Initialize services with dependency injection
 const performanceAnalyzer = new PerformanceAnalyzer();
 
 // Load historical data and initialize health monitor
@@ -23,7 +23,8 @@ const historicalPath = path.resolve(__dirname, 'data/historical.json');
 const historicalData: Transaction[] = JSON.parse(fs.readFileSync(historicalPath, 'utf-8'));
 healthMonitor.initializeFromHistory(historicalData);
 
-const routingEngine = new RoutingEngine();
+// Inject dependencies into routing engine
+const routingEngine = new RoutingEngine(performanceAnalyzer, healthMonitor);
 const fallbackSequencer = new FallbackSequencer(performanceAnalyzer, healthMonitor);
 
 // Wire routes

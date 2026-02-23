@@ -7,31 +7,11 @@ import {
   HealthStatus,
 } from '../models/types';
 import { acquirers } from '../config/acquirers';
-import { performanceAnalyzer } from './performance-analyzer';
+import { PerformanceAnalyzer } from './performance-analyzer';
 
-// Import HealthMonitor if available; default to healthy if not yet built.
-let getHealthStatus: (acquirer: string) => HealthStatus;
-try {
-  // eslint-disable-next-line @typescript-eslint/no-var-requires
-  const healthModule = require('./health-monitor');
-  const monitor = healthModule.healthMonitor || healthModule.default;
-  if (monitor && typeof monitor.getStatus === 'function') {
-    getHealthStatus = (acq: string) => monitor.getStatus(acq);
-  } else {
-    getHealthStatus = defaultHealthStatus;
-  }
-} catch {
-  getHealthStatus = defaultHealthStatus;
-}
-
-function defaultHealthStatus(acquirer: string): HealthStatus {
-  return {
-    acquirer,
-    status: 'healthy',
-    consecutiveFailures: 0,
-    metrics: { successRate: 1, errorRate: 0, timeoutRate: 0, totalProcessed: 0 },
-    lastUpdated: new Date().toISOString(),
-  };
+export interface HealthProvider {
+  getHealth(acquirer: string): HealthStatus;
+  isAvailable(acquirer: string): boolean;
 }
 
 const HEALTH_SCORE_MAP: Record<string, number> = {
@@ -46,7 +26,26 @@ const MODE_WEIGHTS: Record<OptimizationMode, { approval: number; health: number;
   cost_conscious:     { approval: 0.40, health: 0.20, cost: 0.40 },
 };
 
+const DEFAULT_HEALTH: HealthStatus = {
+  acquirer: '',
+  status: 'healthy',
+  consecutiveFailures: 0,
+  metrics: { successRate: 1, errorRate: 0, timeoutRate: 0, totalProcessed: 0 },
+  lastUpdated: new Date().toISOString(),
+};
+
 export class RoutingEngine {
+  private performanceAnalyzer: PerformanceAnalyzer;
+  private healthProvider: HealthProvider;
+
+  constructor(performanceAnalyzer: PerformanceAnalyzer, healthProvider?: HealthProvider) {
+    this.performanceAnalyzer = performanceAnalyzer;
+    this.healthProvider = healthProvider || {
+      getHealth: (acq: string) => ({ ...DEFAULT_HEALTH, acquirer: acq }),
+      isAvailable: () => true,
+    };
+  }
+
   route(request: PaymentRequest): RoutingDecision {
     const mode: OptimizationMode = request.optimizationMode || 'balanced';
     const weights = MODE_WEIGHTS[mode];
@@ -57,19 +56,18 @@ export class RoutingEngine {
     for (const acq of acquirers) {
       if (!acq.enabled) continue;
 
-      const health = getHealthStatus(acq.name);
+      const health = this.healthProvider.getHealth(acq.name);
       if (health.status === 'down') continue;
 
-      const perf = performanceAnalyzer.getApprovalRate(acq.name, {
+      // Check both full name and short name (historical data uses "A", config uses "Acquirer A")
+      const shortName = acq.name.replace('Acquirer ', '');
+      const perf = this.performanceAnalyzer.getApprovalRate(acq.name, {
         currency: request.currency,
         cardType: request.cardType,
         country: request.country,
         amount: request.amount,
       });
-
-      // Also check single-letter key (historical data uses "A", config uses "Acquirer A")
-      const shortName = acq.name.replace('Acquirer ', '');
-      const perfShort = performanceAnalyzer.getApprovalRate(shortName, {
+      const perfShort = this.performanceAnalyzer.getApprovalRate(shortName, {
         currency: request.currency,
         cardType: request.cardType,
         country: request.country,
@@ -144,5 +142,3 @@ export class RoutingEngine {
     };
   }
 }
-
-export const routingEngine = new RoutingEngine();

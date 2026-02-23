@@ -1,7 +1,8 @@
 import * as assert from 'assert';
 import { PerformanceAnalyzer } from '../src/services/performance-analyzer';
-import { RoutingEngine } from '../src/services/routing-engine';
+import { RoutingEngine, HealthProvider } from '../src/services/routing-engine';
 import { FallbackSequencer } from '../src/services/fallback-sequencer';
+import { HealthStatus } from '../src/models/types';
 
 // We need a fresh HealthMonitor class (not the singleton) for isolated tests.
 // Re-implement minimal health monitor for test isolation.
@@ -148,7 +149,19 @@ test('returns zero for unknown acquirer', () => {
 // ---------- Routing Engine Tests ----------
 console.log('\nRouting Engine');
 
-const engine = new RoutingEngine();
+// Create a healthy-everywhere provider for deterministic tests
+const testHealthProvider: HealthProvider = {
+  getHealth: (acq: string): HealthStatus => ({
+    acquirer: acq,
+    status: 'healthy',
+    consecutiveFailures: 0,
+    metrics: { successRate: 1, errorRate: 0, timeoutRate: 0, totalProcessed: 0 },
+    lastUpdated: new Date().toISOString(),
+  }),
+  isAvailable: () => true,
+};
+
+const engine = new RoutingEngine(analyzer, testHealthProvider);
 
 test('selects acquirer with highest weighted score for MXN credit', () => {
   const decision = engine.route({ amount: 200, currency: 'MXN', cardType: 'credit', country: 'MX' });
@@ -251,7 +264,9 @@ test('excludes down acquirers from fallback', () => {
   assert.strictEqual(monitor.getStatus('Acquirer A'), 'down');
   assert.ok(!monitor.isAvailable('Acquirer A'));
 
-  const sequencer = new FallbackSequencer(analyzer, monitor);
+  const sequencer = new FallbackSequencer(analyzer, {
+    isAvailable: (acq: string) => monitor.isAvailable(acq),
+  });
   const fallback = sequencer.getSequence(
     { amount: 200, currency: 'MXN', cardType: 'credit', country: 'MX' },
     'Acquirer B'
@@ -262,7 +277,9 @@ test('excludes down acquirers from fallback', () => {
 
 test('excludes primary acquirer from fallback', () => {
   const monitor = new TestHealthMonitor();
-  const sequencer = new FallbackSequencer(analyzer, monitor);
+  const sequencer = new FallbackSequencer(analyzer, {
+    isAvailable: (acq: string) => monitor.isAvailable(acq),
+  });
   const fallback = sequencer.getSequence(
     { amount: 200, currency: 'BRL', cardType: 'debit', country: 'BR' },
     'Acquirer A'
@@ -273,7 +290,9 @@ test('excludes primary acquirer from fallback', () => {
 
 test('fallback entries are sorted by approval rate descending', () => {
   const monitor = new TestHealthMonitor();
-  const sequencer = new FallbackSequencer(analyzer, monitor);
+  const sequencer = new FallbackSequencer(analyzer, {
+    isAvailable: (acq: string) => monitor.isAvailable(acq),
+  });
   const fallback = sequencer.getSequence(
     { amount: 100, currency: 'USD', cardType: 'credit', country: 'US' },
     'Acquirer A'

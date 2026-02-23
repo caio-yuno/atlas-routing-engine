@@ -70,84 +70,113 @@ export class PerformanceAnalyzer {
     return { rate: stats.approved / stats.total, sampleSize: stats.total };
   }
 
+  /**
+   * Returns a blended approval rate that combines multiple segment dimensions.
+   *
+   * Instead of picking a single "best" segment, we blend all matching segments
+   * using a weighted average. More specific segments (smaller sample size relative
+   * to baseline, combined keys) receive higher weights:
+   *
+   *   - Combined (currency x cardType): weight 4
+   *   - Single-dimension segments: weight 2
+   *   - Baseline: weight 1
+   *
+   * This produces a more robust estimate that incorporates signals from all
+   * relevant dimensions (e.g., both the currency effect and the amount-range
+   * effect) rather than discarding all but one.
+   */
   getApprovalRate(acquirer: string, filters: ApprovalFilters): AcquirerPerformance {
-    // Try most specific segment first, fall back to less specific ones.
-    // Priority: combined > single-dimension > baseline
+    const MIN_SAMPLE = 5;
+    const candidates: { rate: number; sampleSize: number; segment: string; weight: number }[] = [];
 
-    // 1. Acquirer x Currency x CardType (most specific combined key)
+    // 1. Combined key: Acquirer x Currency x CardType (highest weight)
     if (filters.currency && filters.cardType) {
       const seg = this.getSegment(`${acquirer}:currency:${filters.currency}:cardType:${filters.cardType}`);
-      if (seg && seg.sampleSize >= 5) {
-        return {
-          acquirer,
-          approvalRate: seg.rate,
-          sampleSize: seg.sampleSize,
-          segment: `${filters.currency}/${filters.cardType}`,
-        };
+      if (seg && seg.sampleSize >= MIN_SAMPLE) {
+        candidates.push({ ...seg, segment: `${filters.currency}/${filters.cardType}`, weight: 4 });
       }
     }
 
-    // 2. Single-dimension segments — pick the one with best specificity (smallest sample is more targeted)
-    const candidates: { rate: number; sampleSize: number; segment: string }[] = [];
-
+    // 2. Single-dimension segments (medium weight)
     if (filters.currency) {
       const seg = this.getSegment(`${acquirer}:currency:${filters.currency}`);
-      if (seg && seg.sampleSize >= 5) {
-        candidates.push({ ...seg, segment: filters.currency });
+      if (seg && seg.sampleSize >= MIN_SAMPLE) {
+        candidates.push({ ...seg, segment: filters.currency, weight: 2 });
       }
     }
 
     if (filters.cardType) {
       const seg = this.getSegment(`${acquirer}:cardType:${filters.cardType}`);
-      if (seg && seg.sampleSize >= 5) {
-        candidates.push({ ...seg, segment: filters.cardType });
+      if (seg && seg.sampleSize >= MIN_SAMPLE) {
+        candidates.push({ ...seg, segment: filters.cardType, weight: 2 });
       }
     }
 
     if (filters.country) {
       const seg = this.getSegment(`${acquirer}:country:${filters.country}`);
-      if (seg && seg.sampleSize >= 5) {
-        candidates.push({ ...seg, segment: filters.country });
+      if (seg && seg.sampleSize >= MIN_SAMPLE) {
+        candidates.push({ ...seg, segment: filters.country, weight: 2 });
       }
     }
 
     if (filters.amount !== undefined) {
       const range = getAmountRange(filters.amount);
       const seg = this.getSegment(`${acquirer}:amountRange:${range}`);
-      if (seg && seg.sampleSize >= 5) {
-        candidates.push({ ...seg, segment: `amount:${range}` });
+      if (seg && seg.sampleSize >= MIN_SAMPLE) {
+        candidates.push({ ...seg, segment: `amount:${range}`, weight: 2 });
       }
     }
 
-    // Pick the candidate with the smallest sample size (most specific segment)
-    if (candidates.length > 0) {
-      candidates.sort((a, b) => a.sampleSize - b.sampleSize);
-      const best = candidates[0];
-      return {
-        acquirer,
-        approvalRate: best.rate,
-        sampleSize: best.sampleSize,
-        segment: best.segment,
-      };
-    }
-
-    // 3. Baseline acquirer-level rate
+    // 3. Baseline (lowest weight)
     const baseline = this.getSegment(acquirer);
-    if (baseline) {
+    if (baseline && baseline.sampleSize >= MIN_SAMPLE) {
+      candidates.push({ ...baseline, segment: 'overall', weight: 1 });
+    }
+
+    // No data at all
+    if (candidates.length === 0) {
       return {
         acquirer,
-        approvalRate: baseline.rate,
-        sampleSize: baseline.sampleSize,
-        segment: 'overall',
+        approvalRate: 0,
+        sampleSize: 0,
+        segment: 'none',
       };
     }
 
-    // No data at all for this acquirer
+    // If only baseline, return it directly
+    if (candidates.length === 1) {
+      const c = candidates[0];
+      return {
+        acquirer,
+        approvalRate: c.rate,
+        sampleSize: c.sampleSize,
+        segment: c.segment,
+      };
+    }
+
+    // Blend all matching segments using weighted average
+    let weightedSum = 0;
+    let totalWeight = 0;
+    let totalSampleSize = 0;
+    const segmentLabels: string[] = [];
+
+    for (const c of candidates) {
+      weightedSum += c.rate * c.weight;
+      totalWeight += c.weight;
+      totalSampleSize += c.sampleSize;
+      if (c.segment !== 'overall') {
+        segmentLabels.push(c.segment);
+      }
+    }
+
+    const blendedRate = weightedSum / totalWeight;
+    const segmentLabel = segmentLabels.length > 0 ? segmentLabels.join('+') : 'overall';
+
     return {
       acquirer,
-      approvalRate: 0,
-      sampleSize: 0,
-      segment: 'none',
+      approvalRate: blendedRate,
+      sampleSize: totalSampleSize,
+      segment: segmentLabel,
     };
   }
 }

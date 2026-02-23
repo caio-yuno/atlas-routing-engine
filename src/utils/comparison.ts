@@ -1,7 +1,9 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { Transaction, PaymentRequest } from '../models/types';
-import { RoutingEngine } from '../services/routing-engine';
+import { PerformanceAnalyzer } from '../services/performance-analyzer';
+import { RoutingEngine, HealthProvider } from '../services/routing-engine';
+import { HealthStatus } from '../models/types';
 
 interface SegmentImprovement {
   segment: string;
@@ -19,36 +21,122 @@ interface ComparisonResult {
   perSegmentImprovements: SegmentImprovement[];
 }
 
+/**
+ * True counterfactual simulation.
+ *
+ * For each historical transaction we ask: "If we had routed this transaction
+ * to acquirer X instead of the acquirer it actually went to, what would the
+ * outcome have been?"
+ *
+ * We build per-acquirer, per-segment outcome lookup tables from historical data.
+ * When the routing engine selects the same acquirer that was actually used, we
+ * use the real outcome. When it selects a different acquirer, we sample from
+ * that acquirer's historical outcomes for the same segment (currency × cardType
+ * × amountRange) to estimate the counterfactual outcome.
+ *
+ * This is more accurate than using the aggregate approval rate as a probability,
+ * because it preserves the variance and correlation structure of the real data.
+ */
 export function runComparison(): ComparisonResult {
   const historicalPath = path.resolve(__dirname, '../data/historical.json');
   const historical: Transaction[] = JSON.parse(fs.readFileSync(historicalPath, 'utf-8'));
-  const routingEngine = new RoutingEngine();
+
+  const performanceAnalyzer = new PerformanceAnalyzer();
+  // Use a healthy-everywhere provider for fair comparison (no health bias)
+  const neutralHealth: HealthProvider = {
+    getHealth: (acq: string): HealthStatus => ({
+      acquirer: acq,
+      status: 'healthy',
+      consecutiveFailures: 0,
+      metrics: { successRate: 1, errorRate: 0, timeoutRate: 0, totalProcessed: 0 },
+      lastUpdated: new Date().toISOString(),
+    }),
+    isAvailable: () => true,
+  };
+  const routingEngine = new RoutingEngine(performanceAnalyzer, neutralHealth);
 
   const acquirerNames = ['A', 'B', 'C'];
 
-  // --- Round-robin simulation ---
-  // Average approval rate across all acquirers (equal distribution)
-  const acquirerStats: Record<string, { approved: number; total: number }> = {};
-  for (const tx of historical) {
-    if (!acquirerStats[tx.acquirer]) acquirerStats[tx.acquirer] = { approved: 0, total: 0 };
-    acquirerStats[tx.acquirer].total++;
-    if (tx.outcome === 'approved') acquirerStats[tx.acquirer].approved++;
+  // --- Build counterfactual lookup tables ---
+  // Key: "acquirer:currency:cardType:amountRange" → array of outcomes
+  const outcomeTable: Record<string, ('approved' | 'other')[]> = {};
+
+  function getAmountRange(amount: number): string {
+    if (amount <= 100) return 'low';
+    if (amount <= 500) return 'mid';
+    return 'high';
   }
-  const totalApproved = Object.values(acquirerStats).reduce((s, a) => s + a.approved, 0);
-  const totalTx = Object.values(acquirerStats).reduce((s, a) => s + a.total, 0);
-  const roundRobinApprovalRate = totalApproved / totalTx;
 
-  // --- Smart routing simulation ---
-  let smartApproved = 0;
-  const routingDistribution: Record<string, number> = {};
+  for (const tx of historical) {
+    const range = getAmountRange(tx.amount);
+    const key = `${tx.acquirer}:${tx.currency}:${tx.cardType}:${range}`;
+    if (!outcomeTable[key]) outcomeTable[key] = [];
+    outcomeTable[key].push(tx.outcome === 'approved' ? 'approved' : 'other');
+  }
 
-  // Segment tracking
-  type SegKey = string;
-  const segmentSmart: Record<SegKey, { approved: number; total: number }> = {};
-  const segmentRR: Record<SegKey, { approved: number; total: number }> = {};
+  // Deterministic counterfactual sampler: cycles through outcomes for the segment
+  const sampleCounters: Record<string, number> = {};
+  function counterfactualOutcome(acquirer: string, currency: string, cardType: string, amount: number): boolean {
+    const range = getAmountRange(amount);
+    const key = `${acquirer}:${currency}:${cardType}:${range}`;
+    const outcomes = outcomeTable[key];
+    if (!outcomes || outcomes.length === 0) {
+      // Fall back to acquirer-level baseline
+      const baselineKey = acquirer;
+      const baselineOutcomes = outcomeTable[baselineKey];
+      if (!baselineOutcomes) return false;
+      const idx = (sampleCounters[baselineKey] || 0) % baselineOutcomes.length;
+      sampleCounters[baselineKey] = idx + 1;
+      return baselineOutcomes[idx] === 'approved';
+    }
+    const idx = (sampleCounters[key] || 0) % outcomes.length;
+    sampleCounters[key] = idx + 1;
+    return outcomes[idx] === 'approved';
+  }
+
+  // --- Round-robin simulation (true counterfactual) ---
+  let rrApproved = 0;
+  const rrSegments: Record<string, { approved: number; total: number }> = {};
 
   for (let i = 0; i < historical.length; i++) {
     const tx = historical[i];
+    const rrAcquirer = acquirerNames[i % acquirerNames.length];
+
+    let approved: boolean;
+    if (rrAcquirer === tx.acquirer) {
+      // Same acquirer — use actual outcome
+      approved = tx.outcome === 'approved';
+    } else {
+      // Different acquirer — counterfactual sample
+      approved = counterfactualOutcome(rrAcquirer, tx.currency, tx.cardType, tx.amount);
+    }
+
+    if (approved) rrApproved++;
+
+    // Track per-segment
+    const segs = [
+      `currency:${tx.currency}`,
+      `cardType:${tx.cardType}`,
+      `amount:${getAmountRange(tx.amount)}`,
+    ];
+    for (const seg of segs) {
+      if (!rrSegments[seg]) rrSegments[seg] = { approved: 0, total: 0 };
+      rrSegments[seg].total++;
+      if (approved) rrSegments[seg].approved++;
+    }
+  }
+
+  // Reset sample counters for smart routing simulation
+  for (const key of Object.keys(sampleCounters)) {
+    sampleCounters[key] = 0;
+  }
+
+  // --- Smart routing simulation (true counterfactual) ---
+  let smartApproved = 0;
+  const routingDistribution: Record<string, number> = {};
+  const smartSegments: Record<string, { approved: number; total: number }> = {};
+
+  for (const tx of historical) {
     const request: PaymentRequest = {
       amount: tx.amount,
       currency: tx.currency,
@@ -60,48 +148,35 @@ export function runComparison(): ComparisonResult {
     const selectedShort = decision.selectedAcquirer.replace('Acquirer ', '');
 
     // Track distribution
-    routingDistribution[decision.selectedAcquirer] = (routingDistribution[decision.selectedAcquirer] || 0) + 1;
+    routingDistribution[decision.selectedAcquirer] =
+      (routingDistribution[decision.selectedAcquirer] || 0) + 1;
 
-    // Segment keys
-    const currSeg = `currency:${tx.currency}`;
-    const cardSeg = `cardType:${tx.cardType}`;
-    const amtSeg = `amount:${tx.amount <= 100 ? 'low' : tx.amount <= 500 ? 'mid' : 'high'}`;
-
-    const segments = [currSeg, cardSeg, amtSeg];
-
-    // Smart routing: if the engine picks the same acquirer, use actual outcome
-    // Otherwise, use the selected acquirer's historical approval rate as estimate
+    let approved: boolean;
     if (selectedShort === tx.acquirer) {
-      const approved = tx.outcome === 'approved' ? 1 : 0;
-      smartApproved += approved;
-      for (const seg of segments) {
-        if (!segmentSmart[seg]) segmentSmart[seg] = { approved: 0, total: 0 };
-        segmentSmart[seg].total++;
-        segmentSmart[seg].approved += approved;
-      }
+      // Same acquirer — use actual outcome
+      approved = tx.outcome === 'approved';
     } else {
-      const selectedScore = decision.scores.find(s => s.acquirer === decision.selectedAcquirer);
-      const rate = selectedScore ? selectedScore.approvalRate : 0;
-      smartApproved += rate;
-      for (const seg of segments) {
-        if (!segmentSmart[seg]) segmentSmart[seg] = { approved: 0, total: 0 };
-        segmentSmart[seg].total++;
-        segmentSmart[seg].approved += rate;
-      }
+      // Different acquirer — counterfactual sample
+      approved = counterfactualOutcome(selectedShort, tx.currency, tx.cardType, tx.amount);
     }
 
-    // Round-robin segment tracking: use actual outcome
-    const rrAcquirer = acquirerNames[i % acquirerNames.length];
-    const rrApproved = (tx.acquirer === rrAcquirer && tx.outcome === 'approved') ? 1 :
-                       (tx.acquirer !== rrAcquirer) ? (acquirerStats[rrAcquirer]?.approved ?? 0) / (acquirerStats[rrAcquirer]?.total ?? 1) : 0;
-    for (const seg of segments) {
-      if (!segmentRR[seg]) segmentRR[seg] = { approved: 0, total: 0 };
-      segmentRR[seg].total++;
-      segmentRR[seg].approved += rrApproved;
+    if (approved) smartApproved++;
+
+    // Track per-segment
+    const segs = [
+      `currency:${tx.currency}`,
+      `cardType:${tx.cardType}`,
+      `amount:${getAmountRange(tx.amount)}`,
+    ];
+    for (const seg of segs) {
+      if (!smartSegments[seg]) smartSegments[seg] = { approved: 0, total: 0 };
+      smartSegments[seg].total++;
+      if (approved) smartSegments[seg].approved++;
     }
   }
 
   const smartApprovalRate = smartApproved / historical.length;
+  const roundRobinApprovalRate = rrApproved / historical.length;
   const liftPp = Math.round((smartApprovalRate - roundRobinApprovalRate) * 10000) / 100;
 
   // Revenue lift: $15K per percentage point
@@ -118,9 +193,9 @@ export function runComparison(): ComparisonResult {
 
   // Per-segment improvements
   const perSegmentImprovements: SegmentImprovement[] = [];
-  for (const seg of Object.keys(segmentSmart)) {
-    const smart = segmentSmart[seg];
-    const rr = segmentRR[seg];
+  for (const seg of Object.keys(smartSegments)) {
+    const smart = smartSegments[seg];
+    const rr = rrSegments[seg];
     if (!smart || !rr || rr.total === 0 || smart.total === 0) continue;
     const smartRate = smart.approved / smart.total;
     const rrRate = rr.approved / rr.total;

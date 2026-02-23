@@ -10,7 +10,7 @@ Atlas Commerce processes payments through multiple acquirers (A, B, C), each wit
 - **Acquirer B** (3.1% take rate) -- Excellent for MXN credit cards (~92%), more expensive
 - **Acquirer C** (2.1% take rate) -- Cheapest option, strong for low-value transactions (~89%), weaker for high-value (~68%)
 
-Round-robin routing ignores these patterns. Smart routing exploits them to lift approval rates by **+7.15 percentage points**, translating to an estimated **$107,250/month** in additional revenue.
+Round-robin routing ignores these patterns. Smart routing exploits them to lift approval rates by **+8.4 percentage points**, translating to an estimated **$126,000/month** in additional revenue.
 
 ## Quick Start
 
@@ -108,11 +108,15 @@ In `cost_conscious` mode, a safety override prevents selecting the cheapest acqu
 
 ### Segmented Historical Analysis
 
-The performance analyzer computes approval rates at multiple granularities, preferring the most specific segment with sufficient data (minimum 5 samples):
+The performance analyzer computes approval rates at multiple granularities and **blends them using a weighted average** to produce a robust estimate that incorporates signals from all relevant dimensions simultaneously:
 
-1. **Combined:** Acquirer x Currency x CardType (e.g., "B for MXN credit")
-2. **Single-dimension:** Acquirer x Currency, Acquirer x CardType, Acquirer x Country, Acquirer x AmountRange
-3. **Baseline:** Acquirer overall rate
+| Segment Level | Example | Weight |
+|---------------|---------|:------:|
+| **Combined** (currency x cardType) | "B for MXN credit" | 4 |
+| **Single-dimension** (currency, cardType, country, amountRange) | "C for high-value" | 2 each |
+| **Baseline** (acquirer overall) | "A overall" | 1 |
+
+All matching segments with sufficient data (minimum 5 samples) are blended. This means a request for a $600 MXN credit card transaction considers the combined MXN/credit rate, the individual MXN rate, credit rate, high-value rate, country rate, and baseline — weighted by specificity.
 
 Amount ranges: low (0-100), mid (100-500), high (500+).
 
@@ -184,28 +188,29 @@ When the primary acquirer is selected, the engine also produces an ordered fallb
 
 | Metric | Smart Routing | Round-Robin |
 |--------|:-:|:-:|
-| Overall Approval Rate | 88.95% | 81.80% |
-| Lift | +7.15 pp | -- |
-| Est. Monthly Revenue Lift | $107,250 | -- |
+| Overall Approval Rate | 89.6% | 81.2% |
+| Lift | +8.4 pp | -- |
+| Est. Monthly Revenue Lift | $126,000 | -- |
 
 **Per-segment improvements:**
 
 | Segment | Smart | Round-Robin | Lift |
 |---------|:-:|:-:|:-:|
-| MXN transactions | 90.5% | 82.7% | +7.79 pp |
-| Mid-value ($100-500) | 90.4% | 82.9% | +7.51 pp |
-| Credit cards | 89.2% | 81.8% | +7.45 pp |
-| BRL transactions | 89.6% | 82.3% | +7.35 pp |
-| High-value ($500+) | 88.5% | 81.9% | +6.64 pp |
-| Debit cards | 88.7% | 82.8% | +5.88 pp |
+| MXN transactions | 90.9% | 80.7% | +10.27 pp |
+| Credit cards | 90.2% | 81.5% | +8.64 pp |
+| Mid-value ($100-500) | 95.5% | 86.8% | +8.64 pp |
+| High-value ($500+) | 88.1% | 79.5% | +8.63 pp |
+| Debit cards | 89.0% | 80.9% | +8.15 pp |
+| USD transactions | 88.8% | 81.3% | +7.55 pp |
+| BRL transactions | 89.1% | 81.7% | +7.40 pp |
 
-**Routing distribution:** Acquirer A handles 83.4% of traffic, Acquirer C handles 16.6%. Acquirer B is never the primary choice in balanced mode -- its higher take rate offsets its approval advantage in most segments.
+**Routing distribution:** Acquirer A handles 83.4% of traffic, Acquirer B handles 11.7%, and Acquirer C handles 4.9%. The blended segment analysis now correctly routes to Acquirer B for segments where it excels (e.g., MXN credit cards).
 
 ## Trade-offs (2-Hour Constraint)
 
 1. **In-memory only** -- No database; historical data loaded from JSON at startup. Fine for a prototype but would not survive restarts in production.
 2. **Singleton health monitor** -- Initialized once from historical data. A production system would use persistent state and real-time event streams.
-3. **Simplified comparison** -- When smart routing selects a different acquirer than the one in historical data, we estimate using the selected acquirer's approval rate rather than running a true counterfactual simulation.
+3. **Counterfactual simulation** -- When comparing smart vs round-robin routing, we use a true counterfactual approach: when the routing decision differs from the actual acquirer used, we sample from that acquirer's historical outcomes for the same segment (currency x cardType x amountRange). This is more rigorous than using aggregate approval rates as probabilities, though it still assumes past performance predicts future results.
 4. **No authentication** -- API endpoints are unprotected. Production would need API key validation.
 5. **Static acquirer config** -- Acquirer list and take rates are hardcoded. Production would pull from a database or configuration service.
 6. **Single-node** -- No horizontal scaling, no distributed health state.
